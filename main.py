@@ -103,35 +103,45 @@ class FeatureExtractor:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    STATE["device"] = device
-    logger.info(f"Device: {device}")
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        STATE["device"] = device
+        logger.info(f"Device: {device}")
 
-    # Build transform (standard ImageNet preprocessing — same for all categories)
-    STATE["transform"] = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
+        # Build transform (standard ImageNet preprocessing — same for all categories)
+        STATE["transform"] = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
 
-    logger.info("Loading EfficientNet-B4 backbone...")
-    STATE["extractor"] = FeatureExtractor(BACKBONE_PATH, device)
-    logger.info("Backbone loaded ✓")
+        logger.info("Loading EfficientNet-B4 backbone...")
+        if not BACKBONE_PATH.exists():
+            logger.error(f"Backbone file not found: {BACKBONE_PATH}")
+            raise FileNotFoundError(f"Backbone file not found: {BACKBONE_PATH}")
+        STATE["extractor"] = FeatureExtractor(BACKBONE_PATH, device)
+        logger.info("Backbone loaded ✓")
 
+        if not MODELS_DIR.exists():
+            logger.warning(f"Models directory not found: {MODELS_DIR}")
+        else:
+            for pkl_path in sorted(MODELS_DIR.glob("patchcore_*.pkl")):
+                category = pkl_path.stem.replace("patchcore_", "")
+                with open(pkl_path, "rb") as f:
+                    model = custom_unpickler(f)
+                if not hasattr(model, "threshold"):
+                    logger.warning(f"{category}: no threshold found in pkl — using fallback 0.35")
+                    model.threshold = 0.35
+                STATE["models"][category] = model
+                nb = len(model.memory_bank)
+                logger.info(f"Loaded {category}: {nb:,} vectors, threshold={model.threshold:.4f} ✓")
 
-    for pkl_path in sorted(MODELS_DIR.glob("patchcore_*.pkl")):
-        category = pkl_path.stem.replace("patchcore_", "")
-        with open(pkl_path, "rb") as f:
-            model = custom_unpickler(f)
-        if not hasattr(model, "threshold"):
-            logger.warning(f"{category}: no threshold found in pkl — using fallback 0.35")
-            model.threshold = 0.35
-        STATE["models"][category] = model
-        nb = len(model.memory_bank)
-        logger.info(f"Loaded {category}: {nb:,} vectors, threshold={model.threshold:.4f} ✓")
-
-    logger.info(f"Ready — {len(STATE['models'])} categories loaded")
+        logger.info(f"Ready — {len(STATE['models'])} categories loaded")
+    except Exception as e:
+        logger.error(f"Startup failed: {e}", exc_info=True)
+        raise
+    
     yield
 
     STATE["models"].clear()
